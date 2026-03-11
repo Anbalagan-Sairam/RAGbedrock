@@ -1,26 +1,11 @@
-# ===============================
-# Core RAG & LLM libraries
-# ===============================
 langchain
-openai
-
-# ===============================
-# Vector DB & similarity search
-# ===============================
+langchain-aws
+langchain-community
 faiss-cpu
-chromadb
-
-# ===============================
-# Web framework for API / interface
-# ===============================
 fastapi
 uvicorn
-
-# ===============================
-# Utilities
-# ===============================
 python-dotenv
 pydantic
 PyPDF2
-loader
 streamlit
+requests
