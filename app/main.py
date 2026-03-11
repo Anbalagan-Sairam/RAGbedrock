@@ -1,136 +1,81 @@
 # app/main.py
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
 import os
-import json
-import boto3
+from dotenv import load_dotenv
+from langchain_community.vectorstores import FAISS
+from langchain_aws import ChatBedrock, BedrockEmbeddings
 
-from langchain.llms.base import LLM
-from langchain.schema import Document
-from langchain.chains import RetrievalQA
-from langchain.vectorstores import FAISS
-from langchain.embeddings.base import Embeddings
+VECTORSTORE_PATH = "vectorstore"
 
-app = FastAPI(title="Bedrock RAG Demo", version="0.1.0")
+# -----------------------------
+# Load AWS env variables
+# -----------------------------
+load_dotenv()  # AWS_REGION, BEDROCK_LLM_MODEL, BEDROCK_EMBED_MODEL
 
-# -------------------------------
-# Request/Response models
-# -------------------------------
-class AskRequest(BaseModel):
-    query: str
+aws_region = os.environ.get("AWS_REGION")
+embedding_model_id = os.environ.get("BEDROCK_EMBED_MODEL")
+llm_model_id = os.environ.get("BEDROCK_LLM_MODEL")
 
-class AskResponse(BaseModel):
-    answer: str
-    sources: List[str] = []
+# -----------------------------
+# 1️⃣ Load FAISS vectorstore
+# -----------------------------
+print("[INFO] Loading FAISS vectorstore...")
+embedding_function = BedrockEmbeddings(
+    model_id=embedding_model_id,
+    region_name=aws_region
+)
+vectorstore = FAISS.load_local(
+    VECTORSTORE_PATH,
+    embedding_function,
+    allow_dangerous_deserialization=True
+)
+print("[INFO] FAISS vectorstore loaded successfully!")
 
-# -------------------------------
-# AWS Bedrock runtime client
-# -------------------------------
-bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-
-# -------------------------------
-# Embeddings wrapper
-# -------------------------------
-class BedrockEmbeddings(Embeddings):
-    model_id = "amazon.titan-embed-text-v1"
-
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        vectors = []
-        for text in texts:
-            payload = {"inputText": text}  # correct Titan schema
-            resp = bedrock.invoke_model(
-                modelId=self.model_id,
-                body=json.dumps(payload),
-                contentType="application/json",
-                accept="application/json"
-            )
-            vectors.append(json.loads(resp["body"].read())["embedding"])
-        return vectors
-
-    def embed_query(self, text: str) -> List[float]:
-        return self.embed_documents([text])[0]
-
-embeddings = BedrockEmbeddings()
-
-# -------------------------------
-# Load documents
-# -------------------------------
-documents = []
-docs_folder = "docs"
-for fname in os.listdir(docs_folder):
-    if fname.endswith(".txt"):
-        with open(os.path.join(docs_folder, fname), "r") as f:
-            text = f.read()
-        documents.append(Document(page_content=text, metadata={"source": fname}))
-
-if not documents:
-    raise ValueError("No .txt files found in docs folder.")
-
-# -------------------------------
-# Build FAISS vectorstore (let LangChain handle index)
-# -------------------------------
-vectorstore = FAISS.from_documents(
-    documents=documents,
-    embedding=embeddings
+# -----------------------------
+# 2️⃣ Create retriever
+# -----------------------------
+retriever = vectorstore.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 3}  # top 3 relevant chunks
 )
 
-# -------------------------------
-# Nova Lite LLM wrapper
-# -------------------------------
-class NovaLiteLLM(LLM):
-    @property
-    def _llm_type(self):
-        return "novalite"
-
-    def _call(self, prompt: str, stop=None) -> str:
-        payload = {
-            "schemaVersion": "messages-v1",
-            "messages": [{"role": "user", "content": [{"text": prompt}]}]
-        }
-        response = bedrock.invoke_model(
-            modelId="amazon.nova-lite-v1:0",
-            body=json.dumps(payload),
-            contentType="application/json",
-            accept="application/json"
-        )
-        result = json.loads(response["body"].read())
-        content_list = result.get("output", {}).get("message", {}).get("content", [])
-        if content_list:
-            return content_list[0].get("text", "")
-        return "No answer returned from model"
-
-llm = NovaLiteLLM()
-
-# -------------------------------
-# RetrievalQA chain
-# -------------------------------
-retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3})
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",
-    retriever=retriever,
-    return_source_documents=True
+# -----------------------------
+# 3️⃣ Initialize BedrockChat LLM
+# -----------------------------
+llm = ChatBedrock(
+    model_id=llm_model_id,
+    region_name=aws_region
 )
 
-# -------------------------------
-# Health check
-# -------------------------------
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# -----------------------------
+# 4️⃣ Query loop with chunk logging
+# -----------------------------
+print("\nTrailblazeAI RAG Ready! Type 'exit' to quit.")
+while True:
+    query = input("\nQuestion: ")
+    if query.lower() == "exit":
+        break
 
-# -------------------------------
-# /ask endpoint
-# -------------------------------
-@app.post("/ask", response_model=AskResponse)
-def ask(request: AskRequest):
-    try:
-        result = qa_chain({"query": request.query})
-        answer = result["result"]
-        sources = [doc.metadata["source"] for doc in result["source_documents"]]
-    except Exception as e:
-        answer = f"Error calling RAG system: {e}"
-        sources = []
+    # Retrieve relevant chunks
+    relevant_docs = retriever.get_relevant_documents(query)
+    if not relevant_docs:
+        print("No relevant information found for this query.")
+        continue
 
-    return AskResponse(answer=answer, sources=sources)
+    # -----------------------------
+    # Log retrieved chunks
+    # -----------------------------
+    print(f"[INFO] Retrieved {len(relevant_docs)} chunks for query '{query}':")
+    for i, doc in enumerate(relevant_docs, 1):
+        preview = doc.page_content[:200].replace("\n", " ")
+        print(f"  Chunk {i} preview: {preview} ...")
+
+    # Combine context
+    context = "\n".join([doc.page_content for doc in relevant_docs])
+
+    # Ask LLM
+    response = llm.invoke([
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": f"Answer this question based on the following context:\n{context}\n\nQuestion:\n{query}"}
+    ])
+
+    print("\nAnswer:\n", response.content)
