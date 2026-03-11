@@ -1,9 +1,10 @@
 import os
+from pathlib import Path
 from langchain_aws import ChatBedrock
 from langchain_community.vectorstores import FAISS
 from langchain_aws import BedrockEmbeddings
 
-VECTORSTORE_PATH = "vectorstore"
+VECTORSTORE_PATH = Path("vectorstore").resolve()
 
 class RAGEngine:
     def __init__(self, aws_region, embedding_model_id, llm_model_id, k=3):
@@ -11,6 +12,16 @@ class RAGEngine:
         self.embedding_model_id = embedding_model_id
         self.llm_model_id = llm_model_id
         self.k = k
+
+        # -----------------------------
+        # Validate vectorstore path
+        # -----------------------------
+        if not VECTORSTORE_PATH.exists() or not VECTORSTORE_PATH.is_dir():
+            raise RuntimeError(f"Vectorstore path {VECTORSTORE_PATH} missing or not a directory.")
+        if ".." in str(VECTORSTORE_PATH):
+            raise RuntimeError("Vectorstore path contains unsafe elements.")
+        if not os.access(VECTORSTORE_PATH, os.R_OK):
+            raise RuntimeError(f"Vectorstore path {VECTORSTORE_PATH} is not readable.")
 
         # Load vectorstore
         self.vectorstore = self._load_vectorstore()
@@ -27,6 +38,8 @@ class RAGEngine:
             model_id=self.embedding_model_id,
             region_name=self.aws_region
         )
+
+        # Safe FAISS load (no dangerous deserialization)
         vectorstore = FAISS.load_local(
             VECTORSTORE_PATH,
             embedding_function,
@@ -50,19 +63,13 @@ class RAGEngine:
                 "retrieved_chunks": []
             }
 
-        # Combine context with numbered chunks
-        context = "\n\n".join(
-            [f"Document {i+1}:\n{doc.page_content}" for i, doc in enumerate(relevant_docs)]
-        )
+        # Combine context
+        context = "\n".join([doc.page_content for doc in relevant_docs])
 
-        # Context-aware system prompt
         system_prompt = (
-            "You are a smart assistant that answers user queries using the provided context.\n"
-            "Rules:\n"
-            "- Use only the context information.\n"
-            "- If the answer is not present, say the information is unavailable.\n"
-            "- Be clear and concise.\n"
-            "- Use bullet points or summaries when helpful."
+            "You are a smart assistant that answers user queries using the provided context. "
+            "Always provide clear, concise, and informative answers. "
+            "Answer based on context only; do not hallucinate."
         )
 
         response = self.llm.invoke([
@@ -70,7 +77,6 @@ class RAGEngine:
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{query}"}
         ])
 
-        # Return structured output
         return {
             "answer": response.content,
             "retrieved_chunks": [doc.page_content for doc in relevant_docs]
