@@ -1,3 +1,9 @@
+Trailblaze AI v1.0
+
+The goal of project Trailblaze is to create a friendly conversational AI that helps individuals in reaching their nutrition, exercise, finance and relationship goals.
+
+
+
 Access FrontEnd UI via: https://<Studio ID>.studio.us-east-1.sagemaker.aws/jupyterlab/default/proxy/8501/
 
 Process:
