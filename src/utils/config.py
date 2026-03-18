@@ -14,7 +14,7 @@ class AppConfig(BaseSettings):
     pinecone_index_name: str = Field("trailblazeai", env="PINECONE_INDEX_NAME")
 
     # RAG
-    model_k: int = 3
+    model_k: int = 5
 
     model_config = SettingsConfigDict(
         env_file=".env",
